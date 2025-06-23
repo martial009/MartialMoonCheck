@@ -4,116 +4,93 @@ const express = require('express');
 const fetch = require('node-fetch');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
-// In-memory user state
 const userState = {};
 
-// Start command handler
 bot.start((ctx) => {
-  userState[ctx.chat.id] = null; // reset
+  userState[ctx.chat.id] = null;
   return ctx.reply(
-    '👋 Welcome to MartialMoonCheck!\n\nWhat do you want to do?',
+    '👋 Welcome to MartialMoonCheck!\nWhat do you want to do?',
     Markup.inlineKeyboard([
       [Markup.button.callback('🔍 Analyze Token', 'analyze')],
-      [Markup.button.callback('📈 Track Token (coming soon)', 'track')],
     ])
   );
 });
 
-// Handle "Analyze Token" button click
 bot.action('analyze', (ctx) => {
-  ctx.answerCbQuery(); // closes loading
-  userState[ctx.chat.id] = 'awaiting_token_address';
-  ctx.reply('📝 Please send the token address you want to analyze:');
-});
-
-// Handle "Track Token" button click (Coming Soon)
-bot.action('track', (ctx) => {
   ctx.answerCbQuery();
-  ctx.reply('📈 Tracking feature coming soon...');
+  userState[ctx.chat.id] = 'awaiting_token_address';
+  ctx.reply('📝 Send token or pair address to analyze (any chain supported by DexScreener):');
 });
 
-// Handle token address input
 bot.on('text', async (ctx) => {
   const state = userState[ctx.chat.id];
-  const text = ctx.message.text;
+  const input = ctx.message.text.trim();
 
-  if (state === 'awaiting_token_address') {
-    userState[ctx.chat.id] = null; // reset state
-    ctx.reply(`🔍 Analyzing token ${text}...`);
+  if (state !== 'awaiting_token_address') return;
 
-    try {
-      // Call the DEXScreener API to get token info
-      const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${text}`);
-      const data = await res.json();
-      const tokenData = data.data;
+  userState[ctx.chat.id] = null;
+  ctx.reply(`🔍 Analyzing: ${input}...`);
 
-      if (!tokenData) {
-        return ctx.reply('❌ Token not found or unsupported.');
-      }
+  try {
+    // Use DexScreener search endpoint
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${input}`);
+    const json = await res.json();
+    const pair = json.pairs && json.pairs[0];
 
-      // Check if token is a honeypot using GoPlus API or honeypot.is
-      const honeypotRes = await fetch(`https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${text}`);
-      const honeypotData = await honeypotRes.json();
-      const tokenSecurity = honeypotData.result[text];
-      const honeypot = tokenSecurity.is_honeypot === '1' ? '🚫 Honeypot' : '✅ Safe to buy';
-
-      // Analyze token data
-      const buyTax = tokenData.buyTax || 0;
-      const sellTax = tokenData.sellTax || 0;
-      const liquidity = tokenData.liquidity || 0;
-      const marketCap = tokenData.marketCap || 0;
-      const volume = tokenData.volume || 0;
-      const age = tokenData.age || 'Unknown'; // Could use launch time to determine age
-      const successProbability = calculateSuccessProbability(buyTax, sellTax, liquidity, marketCap, volume);
-
-      // Generate summary message
-      const summary = `
-🔎 Token Analysis for ${text}:
-- Honeypot: ${honeypot}
-- Buy Tax: ${buyTax}%
-- Sell Tax: ${sellTax}%
-- Liquidity: $${liquidity}
-- Market Cap: $${marketCap}
-- 24h Volume: $${volume}
-- Age: ${age} days
-- Success Probability: ${successProbability}
-
-💡 Advice: ${honeypot === '🚫 Honeypot' ? 'Avoid. High Risk.' : 'Proceed with caution. DYOR.'}
-      `;
-      ctx.reply(summary);
-    } catch (err) {
-      console.error(err);
-      ctx.reply('❌ Failed to fetch token data. Try again later.');
+    if (!pair) {
+      return ctx.reply('❌ Token/pair not found on DexScreener.');
     }
+
+    // Extract core data
+    const {
+      chainId,
+      url,
+      priceUsd,
+      priceChange,
+      liquidity: { usd: liq },
+      volume: { h24: vol24 },
+      fdv,
+      marketCap,
+      pairCreatedAt,
+      baseToken: { name, symbol },
+    } = pair;
+
+    // Format output
+    const created = new Date(pairCreatedAt).toLocaleDateString();
+    const msg = `
+📊 *${name}* (${symbol}) on *${chainId}*
+🔗 [View on DexScreener](${url})
+
+💰 Price: $${Number(priceUsd).toFixed(6)}
+📉 24h Change: ${Number(priceChange.h24).toFixed(2)}%
+💧 Liquidity: $${Number(liq).toLocaleString()}
+📈 Volume(24h): $${Number(vol24).toLocaleString()}
+💵 Market Cap: $${Number(marketCap || fdv).toLocaleString()}
+📅 Launch Date: ${created}
+
+💡 *Advice:* ${scoreAdvice(vol24, liq, priceChange.h24)}
+`;
+
+    ctx.replyWithMarkdown(msg);
+  } catch (err) {
+    console.error(err);
+    ctx.reply('❌ Error fetching data, please try again.');
   }
 });
 
-// Calculate the success probability of the token based on different factors
-function calculateSuccessProbability(buyTax, sellTax, liquidity, marketCap, volume) {
-  let probability = 0;
-
-  // Apply weights for each factor (adjust as needed)
-  if (buyTax <= 5) probability += 20; // Lower buy tax is good
-  if (sellTax <= 5) probability += 20; // Lower sell tax is good
-  if (liquidity > 100000) probability += 20; // High liquidity is good
-  if (marketCap > 1000000) probability += 20; // Higher market cap is generally more stable
-  if (volume > 50000) probability += 20; // High volume indicates active trading
-
-  // Return a probability range based on calculated score
-  if (probability >= 80) {
-    return '🚀 High potential';
-  } else if (probability >= 60) {
-    return '🤞 Possible';
-  } else {
-    return '⚠️ Risky';
+// Generate simple advice based on activity
+function scoreAdvice(vol24, liq, change24) {
+  if (vol24 > 100_000 && liq > 50_000 && change24 > 0) {
+    return '🚀 Looks juicy — high activity and liquidity. DYOR.';
   }
+  if (vol24 > 10_000 && liq > 10_000) {
+    return '🤞 Some volume/liquidity here — proceed with caution.';
+  }
+  return '⚠️ Low liquidity or volume — high risk.';
 }
 
-// Web server (for Render or other hosting)
-const app = express();
-app.get('/', (req, res) => res.send('Bot is running.'));
-app.listen(process.env.PORT, () => console.log(`Server started on port ${process.env.PORT}`));
-
-// Launch the bot
+// Start server and bot
 bot.launch();
+const app = express();
+app.get('/', (_, res) => res.send('Bot is live.'));
+app.listen(process.env.PORT || 3000);
