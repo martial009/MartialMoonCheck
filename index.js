@@ -4,14 +4,11 @@ const express = require('express');
 const fetch = require('node-fetch');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
-console.log(process.env.BOT_TOKEN);
-// In-memory user state
 const userState = {};
 
 // Start command handler
 bot.start((ctx) => {
-  userState[ctx.chat.id] = null; // reset
+  userState[ctx.chat.id] = null;
   return ctx.reply(
     '👋 Welcome to MartialMoonCheck!\n\nWhat do you want to do?',
     Markup.inlineKeyboard([
@@ -21,14 +18,14 @@ bot.start((ctx) => {
   );
 });
 
-// Handle "Analyze Token" button click
+// Analyze button
 bot.action('analyze', (ctx) => {
-  ctx.answerCbQuery(); // closes loading
+  ctx.answerCbQuery();
   userState[ctx.chat.id] = 'awaiting_token_address';
   ctx.reply('📝 Please send the token address you want to analyze:');
 });
 
-// Handle "Track Token" button click (Coming Soon)
+// Track button (coming soon)
 bot.action('track', (ctx) => {
   ctx.answerCbQuery();
   ctx.reply('📈 Tracking feature coming soon...');
@@ -37,52 +34,60 @@ bot.action('track', (ctx) => {
 // Handle token address input
 bot.on('text', async (ctx) => {
   const state = userState[ctx.chat.id];
-  const text = ctx.message.text;
+  const text = ctx.message.text.trim();
 
   if (state === 'awaiting_token_address') {
-    userState[ctx.chat.id] = null; // reset state
+    userState[ctx.chat.id] = null;
     ctx.reply(`🔍 Analyzing token ${text}...`);
 
     try {
-      // Call the DEXScreener API to get token info
+      // DEXScreener call
       const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${text}`);
       const data = await res.json();
-      const tokenData = data.data;
+
+      const tokenData = data.pairs?.find(
+        pair =>
+          pair.baseToken?.address?.toLowerCase() === text.toLowerCase() ||
+          pair.quoteToken?.address?.toLowerCase() === text.toLowerCase()
+      );
 
       if (!tokenData) {
         return ctx.reply('❌ Token not found or unsupported.');
       }
 
-      // Check if token is a honeypot using GoPlus API or honeypot.is
+      // GoPlus honeypot check
       const honeypotRes = await fetch(`https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${text}`);
-      const honeypotData = await honeypotRes.json();
-      const tokenSecurity = honeypotData.result[text];
-      const honeypot = tokenSecurity.is_honeypot === '1' ? '🚫 Honeypot' : '✅ Safe to buy';
+      const honeypotJson = await honeypotRes.json();
+      const tokenSecurity = honeypotJson.result[text];
+      const honeypot = tokenSecurity?.is_honeypot === '1' ? '🚫 Honeypot' : '✅ Safe to buy';
 
-      // Analyze token data
-      const buyTax = tokenData.buyTax || 0;
-      const sellTax = tokenData.sellTax || 0;
-      const liquidity = tokenData.liquidity || 0;
-      const marketCap = tokenData.marketCap || 0;
-      const volume = tokenData.volume || 0;
-      const age = tokenData.age || 'Unknown'; // Could use launch time to determine age
+      // Get token data
+      const buyTax = tokenSecurity?.buy_tax || 'Unknown';
+      const sellTax = tokenSecurity?.sell_tax || 'Unknown';
+      const liquidity = tokenData.liquidity?.usd || 0;
+      const marketCap = tokenData.fdv || 0;
+      const volume = tokenData.volume?.h24 || 0;
+      const age = tokenSecurity?.transfer_pausable === '1' ? 'Suspicious' : 'Unknown';
       const successProbability = calculateSuccessProbability(buyTax, sellTax, liquidity, marketCap, volume);
 
-      // Generate summary message
       const summary = `
-🔎 Token Analysis for ${text}:
-- Honeypot: ${honeypot}
-- Buy Tax: ${buyTax}%
-- Sell Tax: ${sellTax}%
-- Liquidity: $${liquidity}
-- Market Cap: $${marketCap}
-- 24h Volume: $${volume}
-- Age: ${age} days
-- Success Probability: ${successProbability}
+🔎 *Token Analysis*
+• Name: ${tokenData.baseToken.name} (${tokenData.baseToken.symbol})
+• Honeypot: ${honeypot}
+• Buy Tax: ${buyTax}%
+• Sell Tax: ${sellTax}%
+• Liquidity: $${Number(liquidity).toLocaleString()}
+• Market Cap: $${Number(marketCap).toLocaleString()}
+• 24h Volume: $${Number(volume).toLocaleString()}
+• Age Check: ${age}
+• Success Probability: ${successProbability}
 
-💡 Advice: ${honeypot === '🚫 Honeypot' ? 'Avoid. High Risk.' : 'Proceed with caution. DYOR.'}
-      `;
-      ctx.reply(summary);
+🔗 [View Chart](${tokenData.url})
+
+💡 *Advice:* ${honeypot === '🚫 Honeypot' ? 'Avoid. High Risk.' : 'Proceed with caution. DYOR.'}
+      `.trim();
+
+      ctx.reply(summary, { parse_mode: 'Markdown' });
     } catch (err) {
       console.error(err);
       ctx.reply('❌ Failed to fetch token data. Try again later.');
@@ -90,32 +95,25 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Calculate the success probability of the token based on different factors
+// Success probability logic
 function calculateSuccessProbability(buyTax, sellTax, liquidity, marketCap, volume) {
-  let probability = 0;
+  let score = 0;
 
-  // Apply weights for each factor (adjust as needed)
-  if (buyTax <= 5) probability += 20; // Lower buy tax is good
-  if (sellTax <= 5) probability += 20; // Lower sell tax is good
-  if (liquidity > 100000) probability += 20; // High liquidity is good
-  if (marketCap > 1000000) probability += 20; // Higher market cap is generally more stable
-  if (volume > 50000) probability += 20; // High volume indicates active trading
+  if (parseFloat(buyTax) <= 5) score += 20;
+  if (parseFloat(sellTax) <= 5) score += 20;
+  if (liquidity > 100000) score += 20;
+  if (marketCap > 1000000) score += 20;
+  if (volume > 50000) score += 20;
 
-  // Return a probability range based on calculated score
-  if (probability >= 80) {
-    return '🚀 High potential';
-  } else if (probability >= 60) {
-    return '🤞 Possible';
-  } else {
-    return '⚠️ Risky';
-  }
+  if (score >= 80) return '🚀 High Potential';
+  if (score >= 60) return '🤞 Possible';
+  return '⚠️ Risky';
 }
 
-// Web server (for Render or other hosting)
+// Web server for uptime pings
 const app = express();
 app.get('/', (req, res) => res.send('Bot is running.'));
-app.listen(process.env.PORT, () => console.log(`Server started on port ${process.env.PORT}`));
+app.listen(process.env.PORT || 3000, () => console.log(`Server started on port ${process.env.PORT}`));
 
-// Launch the bot
+// Launch bot
 bot.launch();
-
