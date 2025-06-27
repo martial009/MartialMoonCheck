@@ -52,7 +52,7 @@ bot.on('text', async (ctx) => {
       );
 
       if (!tokenData) {
-        return ctx.reply('❌ Token not found or unsupported.');
+        return ctx.reply('❌ Token not found or unsupported...');
       }
 
       // GoPlus honeypot check
