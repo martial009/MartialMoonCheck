@@ -3,7 +3,7 @@ const { Telegraf, Markup } = require('telegraf');
 const express = require('express');
 const fetch = require('node-fetch');
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
+const bot = new Telegraf("8024129192:AAFvGrqt3AxukjQ_Vh2X4YXr6qCgBM4XLG4");
 const userState = {};
 
 // Start command handler
